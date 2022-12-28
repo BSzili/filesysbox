@@ -3151,6 +3151,34 @@ static int FbxRelabel(struct FbxFS *fs, const char *volname) {
 	return DOSTRUE;
 }
 
+static int FbxDie(struct FbxFS *fs) {
+	struct Library *SysBase = fs->sysbase;
+	struct FbxVolume *vol = fs->currvol;
+
+	/* check if shutdown is already in progress */
+	if (fs->shutdown) {
+		fs->r2 = ERROR_ACTION_NOT_KNOWN;
+		return DOSFALSE;
+	}
+
+	if (!IsMinListEmpty(&vol->locklist) ||
+		!IsMinListEmpty(&vol->notifylist) ||
+		!IsMinListEmpty(&vol->unres_notifys))
+	{
+		fs->r2 = ERROR_OBJECT_IN_USE;
+		return DOSFALSE;
+	}
+
+	FbxCleanupVolume(fs);
+	fs->r2 = 0;
+
+	/* Wake up the even loop */
+	fs->shutdown = TRUE;
+	Signal(&fs->thisproc->pr_Task, 1UL << fs->diskchangesig);
+
+	return DOSTRUE;
+}
+
 static SIPTR FbxDoPacket(struct FbxFS *fs, struct DosPacket *pkt) {
 	LONG type;
 	SIPTR r1;
@@ -3325,6 +3353,9 @@ static SIPTR FbxDoPacket(struct FbxFS *fs, struct DosPacket *pkt) {
 		r1 = FbxSetOwnerInfo(fs, (struct FbxLock *)BADDR(pkt->dp_Arg2), BTOC(pkt->dp_Arg3),
 			pkt->dp_Arg4 >> 16, pkt->dp_Arg4 & 0xffff);
 		break;
+	case ACTION_DIE:
+		r1 = FbxDie(fs);
+		break;
 	case ACTION_IS_FILESYSTEM:
 		r1 = DOSTRUE;
 		fs->r2 = 0;
@@ -3361,7 +3392,10 @@ void FbxHandlePackets(struct FbxFS *fs) {
 	while ((msg = GetMsg(fs->fsport)) != NULL) {
 		pkt = (struct DosPacket *)msg->mn_Node.ln_Name;
 		r1 = FbxDoPacket(fs, pkt);
-		FbxReturnPacket(fs, pkt, r1, fs->r2);
+		if (pkt->dp_Type == ACTION_DIE)
+			fs->deathpacket = pkt;
+		else
+			FbxReturnPacket(fs, pkt, r1, fs->r2);
 	}
 }
 
